@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Holographic Gesture Globe</title>
+    
+    <!-- Three.js for 3D Rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
+    
+    <!-- MediaPipe Libraries for Hand Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050510;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #00ffff;
+            transition: background-color 0.5s ease;
+        }
+
+        body.ir-mode {
+            background-color: #100505;
+            color: #ff3333;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        #webcam-container {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 240px;
+            height: 180px;
+            border: 2px solid #00ffff;
+            border-radius: 8px;
+            overflow: hidden;
+            z-index: 10;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+            transform: scaleX(-1);
+            transition: border-color 0.5s ease, box-shadow 0.5s ease;
+        }
+
+        body.ir-mode #webcam-container {
+            border-color: #ff3333;
+            box-shadow: 0 0 15px rgba(255, 51, 51, 0.3);
+        }
+
+        #webcam {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        h1 {
+            margin: 0 0 5px 0;
+            font-size: 24px;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.7);
+            transition: text-shadow 0.5s ease;
+        }
+
+        body.ir-mode h1 {
+            text-shadow: 0 0 10px rgba(255, 51, 51, 0.7);
+        }
+
+        .status-box {
+            background: rgba(5, 5, 25, 0.8);
+            border: 1px solid #00ffff;
+            padding: 15px;
+            border-radius: 6px;
+            backdrop-filter: blur(5px);
+            pointer-events: auto;
+            min-width: 280px;
+            transition: border-color 0.5s ease, background 0.5s ease;
+        }
+
+        body.ir-mode .status-box {
+            border-color: #ff3333;
+            background: rgba(25, 5, 5, 0.8);
+        }
+
+        .metric {
+            margin: 8px 0;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .value {
+            font-weight: bold;
+            color: #fff;
+            text-shadow: 0 0 5px rgba(255, 255, 255, 0.5);
+        }
+
+        .instructions {
+            margin-top: 15px;
+            border-top: 1px solid rgba(0, 255, 255, 0.3);
+            padding-top: 10px;
+            font-size: 12px;
+            color: #88c0d0;
+            line-height: 1.5;
+            transition: border-top 0.5s ease;
+        }
+
+        body.ir-mode .instructions {
+            border-top: 1px solid rgba(255, 51, 51, 0.3);
+            color: #d08888;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            color: #00ffff;
+            z-index: 100;
+            text-shadow: 0 0 10px #00ffff;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading">UPGRADING GESTURE CORE...</div>
+    <div id="canvas-container"></div>
+    
+    <div id="webcam-container">
+        <video id="webcam" autoplay playsinline></video>
+    </div>
+
+    <div id="ui-overlay">
+        <div class="status-box">
+            <h1>HOLO-MAP ENGINE V2</h1>
+            <div class="metric">System Status: <span class="value" id="status" style="color: #ff0055;">Calibrating</span></div>
+            <div class="metric">Active Gestures: <span class="value" id="gesture">None</span></div>
+            <div class="metric">Zoom Level: <span class="value" id="zoom-ui">1.0x</span></div>
+            <div class="metric">Visual Mode: <span class="value" id="mode-ui" style="color: #00ffff;">STANDARD</span></div>
+            
+            <div class="instructions">
+                <strong>Navigation Manual Addendum:</strong><br>
+                • <strong>Grab & Spin:</strong> Fist closed ✊<br>
+                • <strong>Zoom:</strong> Multi-hand expand/pinch 👐<br>
+                • ⚡ <strong>Speed Spin:</strong> Peace sign ✌️ + drag side-to-side<br>
+                • 🛑 <strong>Freeze Frame:</strong> Open palm ✋ toward camera<br>
+                • 🔴 <strong>Infrared Layer:</strong> Touch pinky to thumb 👌
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. CONFIGURATION & STATE ---
+        const config = {
+            pinchThreshold: 0.04, 
+            pinkyTouchThreshold: 0.05,
+            rotateSpeed: 2.5,
+            speedSpinMultiplier: 5.0,
+            zoomSpeed: 0.05,
+            minRadius: 3,
+            maxRadius: 12
+        };
+
+        let state = {
+            isGrabbing: false,
+            isSpeedSpinning: false,
+            isFrozen: false,
+            isInfrared: false,
+            lastHandX: 0,
+            lastHandY: 0,
+            initialTwoHandDist: null,
+            initialCameraRadius: 7
+        };
+
+        // --- 2. THREE.JS INITIALIZATION ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050510, 0.015);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 7;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        const globeGroup = new THREE.Group();
+        scene.add(globeGroup);
+
+        // Core Sphere Wireframe
+        const sphereGeo = new THREE.SphereGeometry(2, 40, 40);
+        const wireframeMat = new THREE.MeshBasicMaterial({
+            color: 0x00ffff,
+            wireframe: true,
+            transparent: true,
+            opacity: 0.15
+        });
+        const baseGlobe = new THREE.Mesh(sphereGeo, wireframeMat);
+        globeGroup.add(baseGlobe);
+
+        // Grid Rings
+        const gridRings = [];
+        for(let i = 0; i < 12; i++) {
+            const ringGeo = new THREE.RingGeometry(2.01, 2.02, 64);
+            const ringMat = new THREE.MeshBasicMaterial({ color: 0x00aaff, side: THREE.DoubleSide, transparent: true, opacity: 0.4 });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.rotation.x = Math.PI / 2;
+            ring.rotation.y = (i / 12) * Math.PI;
+            globeGroup.add(ring);
+            gridRings.push(ring);
+        }
+
+        // Particle Points Matrix
+        const particleCount = 2500;
+        const particleGeo = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+
+        for (let i = 0; i < particleCount * 3; i += 3) {
+            const u = Math.random();
+            const v = Math.random();
+            const theta = u * 2.0 * Math.PI;
+            const phi = Math.acos(2.0 * v - 1.0);
+            const r = 2.02; 
+
+            positions[i] = r * Math.sin(phi) * Math.cos(theta);
+            positions[i+1] = r * Math.sin(phi) * Math.sin(theta);
+            positions[i+2] = r * Math.cos(phi);
+        }
+
+        particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const particleMat = new THREE.PointsMaterial({
+            color: 0x00ffff,
+            size: 0.04,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
+        });
+        const continentsParticles = new THREE.Points(particleGeo, particleMat);
+        globeGroup.add(continentsParticles);
+
+        // --- Helper Function: Euclidean Distance ---
+        function getDistance(pt1, pt2) {
+            const dx = pt1.x - pt2.x;
+            const dy = pt1.y - pt2.y;
+            const dz = pt1.z - pt2.z;
+            return Math.sqrt(dx*dx + dy*dy + dz*dz);
+        }
+
+        // --- Helper Function: Check Extended Status ---
+        function isFingerExtended(tip, pip, mcp) {
+            return tip.y < pip.y && pip.y < mcp.y;
+        }
+
+        // --- 3. MEDIAPEPIE HANDS SETUP ---
+        const videoElement = document.getElementById('webcam');
+        const statusUi = document.getElementById('status');
+        const gestureUi = document.getElementById('gesture');
+        const zoomUi = document.getElementById('zoom-ui');
+        const modeUi = document.getElementById('mode-ui');
+        const loadingScreen = document.getElementById('loading');
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        hands.onResults(onHandResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+            },
+            width: 640,
+            height: 480
+        });
+        cameraUtils.start();
+
+        // --- 4. GESTURE PROCESSING ENGINE V2 ---
+        function onHandResults(results) {
+            if (loadingScreen) {
+                loadingScreen.style.display = 'none';
+                statusUi.textContent = "Online";
+                statusUi.style.color = "#00ffff";
+            }
+
+            const handCount = results.multiHandLandmarks ? results.multiHandLandmarks.length : 0;
+
+            if (handCount === 0) {
+                state.isGrabbing = false;
+                state.isSpeedSpinning = false;
+                state.isFrozen = false;
+                state.initialTwoHandDist = null;
+                gestureUi.textContent = "None";
+                return;
+            }
+
+            // --- SINGLE HAND PROCESSORS ---
+            if (handCount === 1) {
+                state.initialTwoHandDist = null;
+                const landmarks = results.multiHandLandmarks[0];
+
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                const middleTip = landmarks[12];
+                const ringTip = landmarks[16];
+                const pinkyTip = landmarks[20];
+
+                const currentHandX = landmarks[9].x;
+                const currentHandY = landmarks[9].y;
+
+                const thumbIndexDist = getDistance(thumbTip, indexTip);
+                const thumbPinkyDist = getDistance(thumbTip, pinkyTip);
+
+                const indexExtended = isFingerExtended(indexTip, landmarks[6], landmarks[5]);
+                const middleExtended = isFingerExtended(middleTip, landmarks[10], landmarks[9]);
+                const ringExtended = isFingerExtended(ringTip, landmarks[14], landmarks[13]);
+                const pinkyExtended = isFingerExtended(pinkyTip, landmarks[18], landmarks[17]);
+
+                // FEATURE A: INFRARED TOGGLE (Pinky-Thumb Touch Check)
+                if (thumbPinkyDist < config.pinkyTouchThreshold && !indexExtended && !middleExtended) {
+                    if (!state.isInfrared) {
+                        state.isInfrared = true;
+                        document.body.classList.add('ir-mode');
+                        modeUi.textContent = "INFRARED OVERLAY";
+                        modeUi.style.color = "#ff3333";
+                        
+                        wireframeMat.color.setHex(0xff3333);
+                        particleMat.color.setHex(0xff5555);
+                        gridRings.forEach(r => r.material.color.setHex(0xff0000));
+                        scene.fog.color.setHex(0x100505);
+                    }
+                    gestureUi.textContent = "Mode Locked";
+                    return;
+                } else if (thumbIndexDist < config.pinchThreshold && state.isInfrared && indexExtended) {
+                    state.isInfrared = false;
+                    document.body.classList.remove('ir-mode');
+                    modeUi.textContent = "STANDARD";
+                    modeUi.style.color = "#00ffff";
+                    wireframeMat.color.setHex(0x00ffff);
+                    particleMat.color.setHex(0x00ffff);
+                    gridRings.forEach(r => r.material.color.setHex(0x00aaff));
+                    scene.fog.color.setHex(0x050510);
+                }
+
+                // FEATURE B: FREEZE FRAME (Flat Stop Palm Sign)
+                if (indexExtended && middleExtended && ringExtended && pinkyExtended && thumbIndexDist > 0.1) {
+                    state.isFrozen = true;
+                    state.isGrabbing = false;
+                    state.isSpeedSpinning = false;
+                    gestureUi.textContent = "Freeze Frame 🛑";
+                    return;
+                } else {
+                    state.isFrozen = false;
+                }
+
+                // FEATURE C: SPEED SPIN (Peace Sign Verification Matrix)
+                if (indexExtended && middleExtended && !ringExtended && !pinkyExtended) {
+                    gestureUi.textContent = "Speed Spin ⚡";
+                    if (state.isSpeedSpinning) {
+                        const deltaX = currentHandX - state.lastHandX;
+                        globeGroup.rotation.y += deltaX * config.rotateSpeed * config.speedSpinMultiplier;
+                    }
+                    state.isSpeedSpinning = true;
+                    state.isGrabbing = false;
+                    state.lastHandX = currentHandX;
+                    return;
+                } else {
+                    state.isSpeedSpinning = false;
+                }
+
+                // LEGACY CORE: STANDARD GRAB CONTROL LOOP
+                if (thumbIndexDist < config.pinchThreshold) {
+                    gestureUi.textContent = "Grab & Spin ✊";
+                    if (state.isGrabbing) {
+                        const deltaX = currentHandX - state.lastHandX;
+                        const deltaY = currentHandY - state.lastHandY;
+                        globeGroup.rotation.y += deltaX * config.rotateSpeed;
+                        globeGroup.rotation.x += deltaY * config.rotateSpeed;
+                    }
+                    state.isGrabbing = true;
+                } else {
+                    gestureUi.textContent = "Hand Tracked";
+                    state.isGrabbing = false;
+                }
+
+                state.lastHandX = currentHandX;
+                state.lastHandY = currentHandY;
+            }
+
+            // --- TWO HAND PROCESSORS: ZOOM PIPELINE ---
+            if (handCount === 2) {
+                state.isGrabbing = false;
+                state.isSpeedSpinning = false;
+                state.isFrozen = false;
+                gestureUi.textContent = "Two-Hand Zoom 👐";
+
+                const hand1Wrist = results.multiHandLandmarks[0][0];
+                const hand2Wrist = results.multiHandLandmarks[1][0];
+
+                const currentTwoHandDist = getDistance(hand1Wrist, hand2Wrist);
+
+                if (state.initialTwoHandDist === null) {
+                    state.initialTwoHandDist = currentTwoHandDist;
+                    state.initialCameraRadius = camera.position.z;
+                } else {
+                    const distanceRatio = currentTwoHandDist / state.initialTwoHandDist;
+                    let targetRadius = state.initialCameraRadius / distanceRatio;
+                    
+                    targetRadius = Math.max(config.minRadius, Math.min(config.maxRadius, targetRadius));
+                    camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetRadius, 0.1);
+                    
+                    const zoomScaleText = ((config.maxRadius / camera.position.z)).toFixed(1);
+                    zoomUi.textContent = zoomScaleText + "x";
+                }
+            }
+        }
+
+        // --- 5. ANIMATION LOOP & WINDOW RESIZING ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!state.isGrabbing && !state.isSpeedSpinning && !state.isFrozen) {
+                globeGroup.rotation.y += 0.001;
+            }
+
+            continentsParticles.material.opacity = 0.5 + Math.sin(Date.now() * 0.002) * 0.2;
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
+/*to run on terminal python -m http.server 8000*/
